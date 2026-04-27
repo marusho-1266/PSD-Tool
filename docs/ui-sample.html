@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PSDリサイズ出力ツール（UIサンプル）</title>
+    <style>
+      :root {
+        --bg: #f0f0f0;
+        --panel: #ffffff;
+        --border: #d0d0d0;
+        --text: #1a1a1a;
+        --muted: #5c5c5c;
+        --accent: #0067c0;
+        --accent-hover: #005a9e;
+        --warn-bg: #fff4ce;
+        --warn-border: #f7d774;
+        --canvas-bg: #ffffff;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.08);
+        --radius: 6px;
+        --font: "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+        --mono: "Cascadia Mono", "Consolas", "Monaco", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: var(--font);
+        font-size: 14px;
+        line-height: 1.45;
+        color: var(--text);
+        background: var(--bg);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .app-header {
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 10px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .app-title {
+        font-weight: 600;
+        font-size: 15px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .badge {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        background: #ececec;
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        border-radius: 999px;
+      }
+
+      .app-main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: minmax(320px, 400px) 1fr;
+        gap: 16px;
+        padding: 16px 20px 20px;
+        max-width: 1400px;
+        width: 100%;
+        margin: 0 auto;
+        align-items: start;
+      }
+
+      @media (max-width: 900px) {
+        .app-main {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        padding: 14px 16px;
+      }
+
+      .panel h2 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .panel h2:not(:first-child) {
+        margin-top: 20px;
+      }
+
+      .field {
+        margin-bottom: 10px;
+      }
+
+      .field label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: stretch;
+      }
+
+      .row .grow {
+        flex: 1;
+        min-width: 0;
+      }
+
+      input[type="text"],
+      input[type="number"] {
+        width: 100%;
+        font-family: var(--font);
+        font-size: 13px;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: #fafafa;
+      }
+
+      input:read-only {
+        color: #333;
+        background: #f3f3f3;
+      }
+
+      .btn {
+        font-family: var(--font);
+        font-size: 13px;
+        padding: 6px 12px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: #fff;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .btn:hover {
+        background: #f5f5f5;
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: #005a9e;
+      }
+
+      .btn-primary:hover {
+        background: var(--accent-hover);
+      }
+
+      .btn-block {
+        width: 100%;
+        padding: 10px 14px;
+        font-weight: 600;
+        margin-top: 4px;
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+        font-size: 13px;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+
+      .stat {
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 4px 0;
+        border-bottom: 1px dashed #e5e5e5;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .stat span:last-child {
+        color: #111;
+        font-weight: 500;
+      }
+
+      .sliders {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .slider-wrap {
+        display: grid;
+        grid-template-columns: 88px 1fr 56px;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .slider-wrap label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .slider-wrap input[type="range"] {
+        width: 100%;
+      }
+
+      .slider-wrap output {
+        font-family: var(--mono);
+        font-size: 11px;
+        text-align: right;
+        color: var(--text);
+      }
+
+      .warn-box {
+        background: var(--warn-bg);
+        border: 1px solid var(--warn-border);
+        border-radius: 4px;
+        padding: 8px 10px;
+        font-size: 12px;
+        color: #5c4a00;
+        margin-top: 8px;
+      }
+
+      .warn-box strong {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 11px;
+        color: #7a6200;
+      }
+
+      .preview-wrap {
+        position: sticky;
+        top: 16px;
+      }
+
+      .preview-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 10px;
+        padding: 0 2px;
+      }
+
+      .preview-header h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        text-transform: none;
+        letter-spacing: 0;
+      }
+
+      .preview-meta {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+
+      .canvas-frame {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: #e8e8e8;
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 360px;
+      }
+
+      .canvas {
+        position: relative;
+        width: 100%;
+        max-width: 480px;
+        aspect-ratio: 3508 / 2480;
+        background: var(--canvas-bg);
+        box-shadow: var(--shadow);
+        border: 1px solid #c8c8c8;
+        overflow: hidden;
+      }
+
+      .sample-image {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 72%;
+        height: 45%;
+        transform: translate(calc(-50% + var(--ox, 0px)), calc(-50% + var(--oy, 0px)))
+          scale(var(--s, 1));
+        background: linear-gradient(135deg, #4a90d9 0%, #7ec8e3 50%, #c5e3f6 100%);
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 4px;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: rgba(255, 255, 255, 0.95);
+        font-size: 12px;
+        font-weight: 600;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        user-select: none;
+      }
+
+      .sample-image::after {
+        content: "サンプル画像";
+        position: absolute;
+        bottom: 6px;
+        right: 8px;
+        font-size: 10px;
+        opacity: 0.85;
+      }
+
+      .app-footer {
+        border-top: 1px solid var(--border);
+        background: var(--panel);
+        padding: 8px 20px;
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .note-top {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0 20px 0;
+        max-width: 1400px;
+        width: 100%;
+        padding: 8px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="app-title">
+        <span>PSDリサイズ出力ツール</span>
+        <span class="badge">UI モック / 動作しません</span>
+      </div>
+      <span class="badge" style="color: #333">Windows 想定</span>
+    </header>
+    <p class="note-top">
+      本ページは画面構成の確認用サンプルです。ファイル選択・PSD
+      出力は行えません。右側プレビューはスライダーで仮表示します。プレビューのアスペクト比は本サンプルでは固定（名刺相当）ですが、本番は出力キャンバス（幅:高さ）に追従します（仕様書 §9.3）。
+    </p>
+
+    <div class="app-main">
+      <aside class="panel" aria-label="操作パネル">
+        <h2>ファイル</h2>
+        <div class="field">
+          <label for="f-template">テンプレートPSD</label>
+          <div class="row">
+            <input
+              class="grow"
+              id="f-template"
+              type="text"
+              readonly
+              value="C:\入稿\印刷所A\名刺_テンプレ_350dpi.psd"
+            />
+            <button type="button" class="btn" disabled title="実装時は有効化">参照…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-image">入力画像</label>
+          <div class="row">
+            <input class="grow" id="f-image" type="text" readonly value="C:\入稿\photo.png" />
+            <button type="button" class="btn" disabled title="実装時は有効化">参照…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-out">出力先（PSD）</label>
+          <div class="row">
+            <input
+              class="grow"
+              id="f-out"
+              type="text"
+              readonly
+              value="C:\入稿\out\入稿_2026-04-26_001.psd"
+            />
+            <button type="button" class="btn" disabled title="実装時は有効化">保存先…</button>
+          </div>
+        </div>
+
+        <h2>印刷所マニュアル上書き</h2>
+        <div class="check-row">
+          <input type="checkbox" id="override-en" checked />
+          <label for="override-en">幅・高さ・解像度をマニュアルで上書きする</label>
+        </div>
+        <p style="font-size: 11px; color: var(--muted); margin: 0 0 8px; line-height: 1.45">
+          オフ時は仕様 §8.2.1 のとおり、画面上の数値は §8.2 の「1.
+          画面上指定」に含めず、保存済み→テンプレの決定のみ（本モックは表示のみ）。
+        </p>
+        <div class="grid-3">
+          <div class="field">
+            <label for="o-width">幅 (px)</label>
+            <input id="o-width" type="number" value="2100" min="1" />
+          </div>
+          <div class="field">
+            <label for="o-height">高さ (px)</label>
+            <input id="o-height" type="number" value="1500" min="1" />
+          </div>
+          <div class="field">
+            <label for="o-dpi">解像度 (dpi)</label>
+            <input id="o-dpi" type="number" value="350" min="1" />
+          </div>
+        </div>
+
+        <h2>テンプレート情報</h2>
+        <div class="stat">
+          <span>PSD からの幅 / 高さ</span>
+          <span>1748 × 1181 px</span>
+        </div>
+        <div class="stat">
+          <span>PSD からの解像度</span>
+          <span>350 dpi</span>
+        </div>
+        <div class="stat">
+          <span>上書き後の出力</span>
+          <span>2100 × 1500 px / 350 dpi</span>
+        </div>
+
+        <h2>配置・調整</h2>
+        <p style="font-size: 12px; color: var(--muted); margin: 0 0 8px">
+          contain（内側に収める）を基本とし、下記で仮の微調整を表示します。拡大率は
+          <strong>contain 後</strong>の相対倍率（100% = 自動配置直後。仕様書 §7.1）を想定します。
+        </p>
+        <div class="row" style="margin-bottom: 8px">
+          <!--
+            仕様: containで再配置は本番UIで有効。モックでは挙動未接続のため disabled。
+            実装: §6.2 から再計算し、手動拡大率・オフセットを破棄。
+          -->
+          <button type="button" class="btn grow" id="btn-contain" disabled>containで再配置</button>
+          <!-- v1 推奨: オフセットのみリセット。拡大率は維持（仕様 §7.3）。 -->
+          <button type="button" class="btn" id="btn-center" title="位置X/Yのみリセット（拡大率は維持）">中央に戻す</button>
+        </div>
+        <div class="sliders" aria-label="手動調整">
+          <div class="slider-wrap">
+            <label for="sl-scale">拡大率</label>
+            <input type="range" id="sl-scale" min="80" max="120" value="100" />
+            <output id="out-scale">100%</output>
+          </div>
+          <div class="slider-wrap">
+            <label for="sl-x">位置 X</label>
+            <input type="range" id="sl-x" min="-40" max="40" value="0" />
+            <output id="out-x">0px</output>
+          </div>
+          <div class="slider-wrap">
+            <label for="sl-y">位置 Y</label>
+            <input type="range" id="sl-y" min="-30" max="30" value="0" />
+            <output id="out-y">0px</output>
+          </div>
+        </div>
+
+        <div class="warn-box" id="warn-oob" role="status" hidden>
+          <strong>警告（サンプル）</strong>
+          <div>手動調整により、画像の一部がキャンバス外にはみ出す可能性があります。入稿前に位置をご確認ください。</div>
+          <p style="margin: 6px 0 0; font-size: 11px; color: #6b5a1a; line-height: 1.4">
+            本番では仕様 §10.2
+            のとおり、リサイズ・変形後の<strong>幾何</strong>に基づき判定します。本モックはしきい値の簡易再現（拡大率
+            100% 超、または大きい X/Y オフセット）にすぎません。
+          </p>
+        </div>
+
+        <!-- 実装時: 書き出し処理を有効化 -->
+        <button type="button" class="btn btn-primary btn-block" disabled>PSDとして書き出し</button>
+      </aside>
+
+      <div class="preview-wrap">
+        <div class="preview-header">
+          <h2>プレビュー</h2>
+          <span class="preview-meta">白背景 / contain イメージ</span>
+        </div>
+        <div class="canvas-frame">
+          <div class="canvas" id="canvas" aria-label="白背景のキャンバス">
+            <div class="sample-image" id="sample-image" style="--s: 1; --ox: 0px; --oy: 0px">
+              3508×2480
+            </div>
+          </div>
+        </div>
+        <p style="font-size: 12px; color: var(--muted); margin: 8px 2px 0">
+          本番: プレビュー枠の縦横比は <strong>出力キャンバス</strong>（上書き後の幅:高さ）に追従。本HTMLは
+          3508:2480 固定（サンプル）。拡大率は contain 後の相対率（仕様 §7.1）と揃えて表示します。
+        </p>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      <span>準備完了（モック） — 本サンプルは接続先ファイルを変更しません</span>
+      <span>v0.0.0-sample</span>
+    </footer>
+
+    <script>
+      (function () {
+        const slScale = document.getElementById("sl-scale");
+        const slX = document.getElementById("sl-x");
+        const slY = document.getElementById("sl-y");
+        const outScale = document.getElementById("out-scale");
+        const outX = document.getElementById("out-x");
+        const outY = document.getElementById("out-y");
+        const img = document.getElementById("sample-image");
+        const warn = document.getElementById("warn-oob");
+        const btnCenter = document.getElementById("btn-center");
+
+        function update() {
+          const s = (Number(slScale.value) / 100).toFixed(2);
+          const ox = slX.value + "px";
+          const oy = slY.value + "px";
+          outScale.textContent = slScale.value + "%";
+          outX.textContent = slX.value + "px";
+          outY.textContent = slY.value + "px";
+          img.style.setProperty("--s", s);
+          img.style.setProperty("--ox", ox);
+          img.style.setProperty("--oy", oy);
+
+          // 本実装: 幾何判定（外接矩形とキャンバス境界）。ここはモック用の粗い目安。
+          const oob =
+            Number(slScale.value) > 100 ||
+            Math.abs(Number(slX.value)) > 12 ||
+            Math.abs(Number(slY.value)) > 8;
+          warn.hidden = !oob;
+        }
+
+        [slScale, slX, slY].forEach(function (el) {
+          el.addEventListener("input", update);
+        });
+        btnCenter.addEventListener("click", function () {
+          slX.value = 0;
+          slY.value = 0;
+          update();
+        });
+        update();
+      })();
+    </script>
+  </body>
+</html>
