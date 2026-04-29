@@ -57,9 +57,17 @@ def layer_paste_rect_and_overflow(
     rw_i: int,
     rh_i: int,
     c: ContainResult,
+    *,
+    anchor_top_left: bool = False,
 ) -> tuple[int, int, bool]:
     """キャッシュした scaled_rgba に対しオフセットのみ適用し貼り付け座標とはみ出しを返す。"""
-    l, t, rw, rh = apply_manual(c, manual_scale_pct, off_x, off_y)
+    l, t, rw, rh = apply_manual(
+        c,
+        manual_scale_pct,
+        off_x,
+        off_y,
+        anchor_top_left=anchor_top_left,
+    )
     ri_w = max(1, int(round(rw)))
     ri_h = max(1, int(round(rh)))
     if ri_w != rw_i or ri_h != rh_i:
@@ -83,6 +91,8 @@ def build_layer_and_overflow(
     manual_scale_pct: float,
     off_x: float,
     off_y: float,
+    *,
+    anchor_top_left: bool = False,
 ) -> tuple[Image.Image, int, int, bool, ContainResult]:
     """
     リサイズ後の RGBA レイヤ画像と整数座標、はみ出し、contain 情報。
@@ -101,6 +111,7 @@ def build_layer_and_overflow(
         rw_i,
         rh_i,
         c,
+        anchor_top_left=anchor_top_left,
     )
     return scaled, li, ti, oob, c
 
@@ -147,11 +158,16 @@ def write_psd(
     out_path: str | Path,
     dpi: float,
 ) -> None:
-    """白背景ドキュメント + 写真レイヤー（仕様 §5.1 の 背景 + 画像）。"""
+    """白背景ドキュメント + 写真レイヤー（仕様 §5.1 の 背景 + 画像）。
+
+    出力は対象パスへ直接保存する（一時ファイル→replace は環境によってブロック／終了しない報告があったため廃止）。
+    """
     psd = PSDImage.new("RGB", (canvas_w, canvas_h), color=(255, 255, 255))
     psd.create_pixel_layer(layer_rgba, name="Image", left=left, top=top)
     psd.image_resources[Resource.RESOLUTION_INFO] = ImageResource(
         key=Resource.RESOLUTION_INFO,
         data=resolution_info_from_dpi(dpi),
     )
-    psd.save(str(out_path))
+    dst = Path(out_path).expanduser()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(str(dst))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image, ImageQt
@@ -14,8 +15,8 @@ try:
 except ImportError:
     _BILINEAR = Image.BILINEAR  # type: ignore[attr-defined]
     _LANCZOS = Image.LANCZOS  # type: ignore[attr-defined]
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtCore import QMetaObject, QObject, QPointF, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -52,6 +54,178 @@ def _qimage_from_pil(im: Image.Image):
     return ImageQt.ImageQt(im)
 
 
+# プレビューラベルの背景 (#e8e8e8) とズーム時の余白を一致させる
+_PREVIEW_BG_GREY = (232, 232, 232)
+
+
+def _compose_preview_zoom_viewport(
+    base_rgb: Image.Image,
+    nw: int,
+    nh: int,
+    zoom_pct: int,
+    off_x: float | None = None,
+    off_y: float | None = None,
+) -> Image.Image:
+    """
+    プレビュー表示ズーム。表示ウィジェットのピクセルサイズは常に nw×nh とする。
+    縮小: 画像を余白内で配置（off_* が None のとき中央）。
+    拡大: off_* が None のとき中央クロップ、指定時はその原点で nw×nh を切り出し。
+    """
+    z = max(0.01, zoom_pct / 100.0)
+    sw = max(1, int(round(nw * z)))
+    sh = max(1, int(round(nh * z)))
+    scaled = base_rgb.resize((sw, sh), _BILINEAR)
+    out = Image.new("RGB", (nw, nh), _PREVIEW_BG_GREY)
+    if sw <= nw and sh <= nh:
+        px = float((nw - sw) // 2) if off_x is None else float(off_x)
+        py = float((nh - sh) // 2) if off_y is None else float(off_y)
+        px = max(0.0, min(float(nw - sw), px))
+        py = max(0.0, min(float(nh - sh), py))
+        out.paste(scaled, (int(round(px)), int(round(py))))
+        return out
+    left = (
+        float(max(0, min((sw - nw) // 2, sw - nw)))
+        if off_x is None
+        else float(off_x)
+    )
+    top = (
+        float(max(0, min((sh - nh) // 2, sh - nh)))
+        if off_y is None
+        else float(off_y)
+    )
+    left = max(0.0, min(float(sw - nw), left))
+    top = max(0.0, min(float(sh - nh), top))
+    cropped = scaled.crop(
+        (int(round(left)), int(round(top)), int(round(left + nw)), int(round(top + nh)))
+    )
+    out.paste(cropped, (0, 0))
+    return out
+
+
+def _preview_zoom_scaled_dims(nw: int, nh: int, zoom_pct: int) -> tuple[int, int]:
+    z = max(0.01, zoom_pct / 100.0)
+    sw = max(1, int(round(nw * z)))
+    sh = max(1, int(round(nh * z)))
+    return sw, sh
+
+
+def _preview_viewport_to_base(
+    vx: float,
+    vy: float,
+    nw: int,
+    nh: int,
+    zoom_pct: int,
+    off_x: float | None,
+    off_y: float | None,
+) -> tuple[float, float]:
+    """ビューポート座標をベース画像（nw×nh）上の座標に変換。"""
+    sw, sh = _preview_zoom_scaled_dims(nw, nh, zoom_pct)
+    if sw <= nw and sh <= nh:
+        px = float((nw - sw) // 2) if off_x is None else float(off_x)
+        py = float((nh - sh) // 2) if off_y is None else float(off_y)
+        px = max(0.0, min(float(nw - sw), px))
+        py = max(0.0, min(float(nh - sh), py))
+        sx = vx - px
+        sy = vy - py
+    else:
+        left = (
+            float(max(0, min((sw - nw) // 2, sw - nw)))
+            if off_x is None
+            else float(off_x)
+        )
+        top = (
+            float(max(0, min((sh - nh) // 2, sh - nh)))
+            if off_y is None
+            else float(off_y)
+        )
+        left = max(0.0, min(float(sw - nw), left))
+        top = max(0.0, min(float(sh - nh), top))
+        sx = left + vx
+        sy = top + vy
+    bx = sx * nw / sw
+    by = sy * nh / sh
+    return bx, by
+
+
+def _preview_anchor_offsets_for_zoom(
+    vx: float,
+    vy: float,
+    nw: int,
+    nh: int,
+    zoom_pct: int,
+    bx: float,
+    by: float,
+) -> tuple[float, float]:
+    """ベース上の (bx,by) がビューポートの (vx,vy) に来るような off_x, off_y。"""
+    sw, sh = _preview_zoom_scaled_dims(nw, nh, zoom_pct)
+    sx = bx * sw / nw
+    sy = by * sh / nh
+    if sw <= nw and sh <= nh:
+        px = vx - sx
+        py = vy - sy
+        px = max(0.0, min(float(nw - sw), px))
+        py = max(0.0, min(float(nh - sh), py))
+        return px, py
+    left = sx - vx
+    top = sy - vy
+    left = max(0.0, min(float(sw - nw), left))
+    top = max(0.0, min(float(sh - nh), top))
+    return left, top
+
+
+class ExportWorker(QObject):
+    """書き出し処理をメインスレッドから分離し、完了時に結果だけ通知する。"""
+
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        source_rgba: Image.Image,
+        resolved: ResolvedOutput,
+        manual_scale_pct: float,
+        off_x: float,
+        off_y: float,
+        anchor_top_left: bool,
+        out_path: str,
+    ) -> None:
+        super().__init__()
+        self._source_rgba = source_rgba
+        self._resolved = resolved
+        self._manual_scale_pct = manual_scale_pct
+        self._off_x = off_x
+        self._off_y = off_y
+        self._anchor_top_left = anchor_top_left
+        self._out_path = out_path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            r = self._resolved
+            # メインスレッドがプレビュー合成などで同画像を触れるので別バッファで処理する
+            src = self._source_rgba.copy()
+            layer, li, ti, oob, _ = build_layer_and_overflow(
+                src,
+                r.width,
+                r.height,
+                self._manual_scale_pct,
+                self._off_x,
+                self._off_y,
+                anchor_top_left=self._anchor_top_left,
+            )
+            write_psd(
+                layer,
+                li,
+                ti,
+                r.width,
+                r.height,
+                self._out_path,
+                r.dpi,
+            )
+            self.finished.emit(("ok", self._out_path, oob))
+        except Exception as e:  # noqa: BLE001
+            self.finished.emit(("err", e))
+
+
 class PreviewLabel(QLabel):
     """プレビュー画像を左ドラッグで平行移動し、位置 X/Y スライダーと同期する。"""
 
@@ -63,7 +237,11 @@ class PreviewLabel(QLabel):
         self._last_mouse = None
         self._delta_cb = None
         self._begin_cb = None
+        self._wheel_zoom_cb = None
         self.setMouseTracking(False)
+
+    def set_wheel_zoom_callback(self, cb) -> None:
+        self._wheel_zoom_cb = cb
 
     def set_drag_callbacks(self, begin_cb, delta_cb) -> None:
         self._begin_cb = begin_cb
@@ -119,6 +297,21 @@ class PreviewLabel(QLabel):
             self._delta_cb(dx * self._scale_x, dy * self._scale_y)
         super().mouseMoveEvent(event)
 
+    def wheelEvent(self, event) -> None:
+        from PySide6.QtGui import QWheelEvent
+
+        if (
+            isinstance(event, QWheelEvent)
+            and bool(event.modifiers() & Qt.ControlModifier)
+            and self._wheel_zoom_cb is not None
+            and self.pixmap() is not None
+            and not self.pixmap().isNull()
+        ):
+            self._wheel_zoom_cb(float(event.angleDelta().y()), event.position())
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def enterEvent(self, event) -> None:
         if self.pixmap() is not None and not self.pixmap().isNull():
             self.setCursor(
@@ -153,9 +346,28 @@ class MainWindow(QMainWindow):
         self._preview_layer_rgba: Image.Image | None = None
         self._overlay_at_preview_key: tuple[int, int, int] | None = None
         self._overlay_at_preview_rgb: Image.Image | None = None
+        self._preview_base_rgb: Image.Image | None = None
+        self._preview_meta_cw: int = 0
+        self._preview_meta_ch: int = 0
+        self._preview_meta_oob: bool = False
+        self._preview_zoom_off_x: float | None = None
+        self._preview_zoom_off_y: float | None = None
+        self._export_busy: bool = False
+        self._export_progress: QProgressDialog | None = None
+        self._export_prev_status: str = ""
+        self._export_payload: object | None = None
+        self._export_thread: QThread | None = None
+        self._export_worker: ExportWorker | None = None
 
         w = self._build_ui()
         self.setCentralWidget(w)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        t = self._export_thread
+        if t is not None and t.isRunning():
+            t.quit()
+            t.wait(30_000)
+        super().closeEvent(event)
 
     def _build_ui(self) -> QWidget:
         root = QSplitter(Qt.Horizontal)
@@ -204,9 +416,25 @@ class MainWindow(QMainWindow):
         # 調整
         g_adj = QGroupBox("配置・調整")
         al = QVBoxLayout(g_adj)
-        self._sl_scale = self._slider_row("拡大率 (contain 後 %)", 10, 500, 100, al)
-        self._sl_ox = self._slider_row("位置 X (px)", -2000, 2000, 0, al)
-        self._sl_oy = self._slider_row("位置 Y (px)", -2000, 2000, 0, al)
+        self._sl_scale, self._sp_scale = self._slider_spin_row(
+            "拡大率 (contain 後 %)", 10, 500, 100, al
+        )
+        self._chk_scale_anchor_tl = QCheckBox(
+            "拡大縮小は画像の左上を固定する（オフ＝中心固定）"
+        )
+        self._chk_scale_anchor_tl.setToolTip(
+            "オンにすると、contain 後の矩形の左上を固定して拡大・縮小します。"
+            "オフのときは従来どおり、矩形の中心を固定して伸縮します。"
+            "切り替え時は見た目の位置が変わらないよう位置を変換します。"
+        )
+        self._chk_scale_anchor_tl.toggled.connect(self._on_anchor_tl_toggled)
+        al.addWidget(self._chk_scale_anchor_tl)
+        self._sl_ox, self._sp_ox = self._slider_spin_row(
+            "位置 X (px)", -2000, 2000, 0, al
+        )
+        self._sl_oy, self._sp_oy = self._slider_spin_row(
+            "位置 Y (px)", -2000, 2000, 0, al
+        )
         hb = QHBoxLayout()
         self._btn_contain = QPushButton("containで再配置")
         self._btn_contain.clicked.connect(self._on_contain)
@@ -249,8 +477,26 @@ class MainWindow(QMainWindow):
         )
         self._chk_tpl_overlay.toggled.connect(self._refresh_preview)
         rl.addWidget(self._chk_tpl_overlay)
-        self._sl_tpl_opacity = self._slider_row("ガイドの強さ (%)", 10, 100, 90, rl)
-        self._sl_tpl_opacity.valueChanged.connect(self._refresh_preview)
+        self._sl_tpl_opacity, self._sp_tpl_opacity = self._slider_spin_row(
+            "ガイドの強さ (%)", 10, 100, 90, rl
+        )
+        self._sl_preview_zoom, self._sp_preview_zoom = self._slider_spin_row(
+            "プレビュー表示 (%)",
+            25,
+            400,
+            100,
+            rl,
+            value_changed_slot=self._on_preview_zoom_changed,
+        )
+        lbl_zoom_hint = QLabel(
+            "※ 書き出し解像度には影響しません。"
+            "表示枠の大きさは一定で、縮小時は余白・拡大時はクロップ。"
+            "Ctrl + ホイールはカーソル位置を中心に拡大・縮小します。"
+            "スライダー／数値は中央基準に戻ります。"
+        )
+        lbl_zoom_hint.setStyleSheet("color:#666;font-size:11px;")
+        lbl_zoom_hint.setWordWrap(True)
+        rl.addWidget(lbl_zoom_hint)
         self._lbl_preview = PreviewLabel()
         self._lbl_preview.setText("テンプレートと画像を指定してください。")
         self._lbl_preview.setAlignment(Qt.AlignCenter)
@@ -259,12 +505,14 @@ class MainWindow(QMainWindow):
         self._lbl_preview.setScaledContents(False)
         self._lbl_preview.setToolTip(
             "左ボタンドラッグで入力画像を移動します（位置 X / Y と連動）。"
+            "Ctrl + ホイールでプレビュー表示をカーソル位置を中心に拡大・縮小できます。"
         )
+        self._lbl_preview.set_wheel_zoom_callback(self._on_preview_wheel_zoom)
         self._lbl_preview.set_drag_callbacks(
             self._preview_drag_begin,
             self._on_preview_drag_delta,
         )
-        rl.addWidget(self._lbl_preview, 1)
+        rl.addWidget(self._lbl_preview, 1, Qt.AlignmentFlag.AlignCenter)
         self._status = QLabel("準備中")
         self._status.setStyleSheet("color: #555;")
         rl.addWidget(self._status)
@@ -273,13 +521,61 @@ class MainWindow(QMainWindow):
         root.addWidget(right)
         root.setSizes([520, 480])
 
-        # シグナル
-        for s in (self._sl_scale, self._sl_ox, self._sl_oy):
-            s.valueChanged.connect(self._refresh_preview)
+        # シグナル（拡大率・位置・ガイド強さはスライダ側でプレビュー更新済み）
         self._sp_w.valueChanged.connect(self._on_dim_changed)
         self._sp_h.valueChanged.connect(self._on_dim_changed)
         self._sp_dpi.valueChanged.connect(self._on_dim_changed)
         return root
+
+    def _on_anchor_tl_toggled(self, checked: bool) -> None:
+        """アンカー切替で貼り付け座標が変わらないよう位置 X/Y を変換する。"""
+        new_tl = checked
+        if not self._template or not self._source_rgba:
+            self._refresh_preview()
+            return
+        try:
+            r = self._resolved()
+        except Exception:  # noqa: BLE001
+            self._refresh_preview()
+            return
+        cw, ch = r.width, r.height
+        c = compute_contain(cw, ch, self._source_rgba.width, self._source_rgba.height)
+        scale_pct = float(self._sl_scale.value())
+        ox = float(self._sl_ox.value())
+        oy = float(self._sl_oy.value())
+        old_tl = not new_tl
+        l, t, _, _ = apply_manual(c, scale_pct, ox, oy, anchor_top_left=old_tl)
+        if new_tl:
+            ox_new = l - c.left
+            oy_new = t - c.top
+        else:
+            m = scale_pct / 100.0
+            rw_s = c.resized_w * m
+            rh_s = c.resized_h * m
+            ox_new = l - c.left - (c.resized_w - rw_s) / 2.0
+            oy_new = t - c.top - (c.resized_h - rh_s) / 2.0
+        ox_i = max(
+            self._sl_ox.minimum(),
+            min(self._sl_ox.maximum(), int(round(ox_new))),
+        )
+        oy_i = max(
+            self._sl_oy.minimum(),
+            min(self._sl_oy.maximum(), int(round(oy_new))),
+        )
+        self._sl_ox.blockSignals(True)
+        self._sl_oy.blockSignals(True)
+        self._sp_ox.blockSignals(True)
+        self._sp_oy.blockSignals(True)
+        self._sl_ox.setValue(ox_i)
+        self._sl_oy.setValue(oy_i)
+        self._sp_ox.setValue(ox_i)
+        self._sp_oy.setValue(oy_i)
+        self._sl_ox.blockSignals(False)
+        self._sl_oy.blockSignals(False)
+        self._sp_ox.blockSignals(False)
+        self._sp_oy.blockSignals(False)
+        self._preview_layer_key = None
+        self._refresh_preview()
 
     def _preview_drag_begin(self) -> None:
         self._preview_pan_rx = 0.0
@@ -302,10 +598,16 @@ class MainWindow(QMainWindow):
         oy = max(oy_lo, min(oy_hi, self._sl_oy.value() + iy))
         self._sl_ox.blockSignals(True)
         self._sl_oy.blockSignals(True)
+        self._sp_ox.blockSignals(True)
+        self._sp_oy.blockSignals(True)
         self._sl_ox.setValue(ox)
         self._sl_oy.setValue(oy)
+        self._sp_ox.setValue(ox)
+        self._sp_oy.setValue(oy)
         self._sl_ox.blockSignals(False)
         self._sl_oy.blockSignals(False)
+        self._sp_ox.blockSignals(False)
+        self._sp_oy.blockSignals(False)
         self._refresh_preview()
 
     def _row_file(
@@ -354,9 +656,16 @@ class MainWindow(QMainWindow):
         row.addWidget(box)
         return s
 
-    def _slider_row(
-        self, title: str, lo: int, hi: int, defv: int, parent: QVBoxLayout
-    ) -> QSlider:
+    def _slider_spin_row(
+        self,
+        title: str,
+        lo: int,
+        hi: int,
+        defv: int,
+        parent: QVBoxLayout,
+        *,
+        value_changed_slot: Callable[..., None] | None = None,
+    ) -> tuple[QSlider, QSpinBox]:
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -364,14 +673,32 @@ class MainWindow(QMainWindow):
         sl = QSlider(Qt.Horizontal)
         sl.setRange(lo, hi)
         sl.setValue(defv)
-        val = QLabel(str(defv))
-        val.setFixedWidth(56)
-        val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        sl.valueChanged.connect(lambda v: val.setText(str(v)))
+        sp = QSpinBox()
+        sp.setRange(lo, hi)
+        sp.setValue(defv)
+        # PySide6 の QSpinBox には setMinimumContentsLength が無いため、フォントに応じた最小幅で桁を収める
+        widest_txt = max(str(lo), str(hi), key=len)
+        fm = QFontMetrics(sp.font())
+        sp.setMinimumWidth(max(130, fm.horizontalAdvance(widest_txt) + 52))
+
+        def sync_spin(v: int) -> None:
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
+
+        sl.valueChanged.connect(sync_spin)
+        slot = (
+            value_changed_slot
+            if value_changed_slot is not None
+            else self._refresh_preview
+        )
+        sl.valueChanged.connect(slot)
+        sp.valueChanged.connect(sl.setValue)
+
         lay.addWidget(sl, 1)
-        lay.addWidget(val)
+        lay.addWidget(sp)
         parent.addWidget(w)
-        return sl
+        return sl, sp
 
     def _on_override_toggled(self, on: bool) -> None:
         for w in (self._sp_w, self._sp_h, self._sp_dpi):
@@ -417,6 +744,7 @@ class MainWindow(QMainWindow):
         has_ov = self._template_overlay_rgb is not None
         self._chk_tpl_overlay.setEnabled(has_ov)
         self._sl_tpl_opacity.setEnabled(has_ov)
+        self._sp_tpl_opacity.setEnabled(has_ov)
         self._update_template_labels()
         self._on_contain()
         self._status.setText(
@@ -502,26 +830,117 @@ class MainWindow(QMainWindow):
         self._sl_oy.setValue(0)
         self._refresh_preview()
 
+    def _on_preview_zoom_changed(self, _value: int | None = None) -> None:
+        """プレビュー表示のみ。キャッシュ済みベース画像があるときは再合成しない。"""
+        self._preview_zoom_off_x = None
+        self._preview_zoom_off_y = None
+        if self._preview_base_rgb is None:
+            self._refresh_preview()
+            return
+        self._apply_preview_zoom_display()
+
+    def _on_preview_wheel_zoom(self, angle_delta_y: float, pos: QPointF) -> None:
+        if angle_delta_y == 0:
+            return
+        if self._preview_base_rgb is None:
+            return
+        prev = self._preview_base_rgb
+        nw, nh = prev.size
+        step = 10 if angle_delta_y > 0 else -10
+        lo = self._sl_preview_zoom.minimum()
+        hi = self._sl_preview_zoom.maximum()
+        cur = self._sl_preview_zoom.value()
+        v = max(lo, min(hi, cur + step))
+        if v == cur:
+            return
+        vx = max(0.0, min(float(nw - 1), float(pos.x())))
+        vy = max(0.0, min(float(nh - 1), float(pos.y())))
+        z_old = int(cur)
+        bx, by = _preview_viewport_to_base(
+            vx,
+            vy,
+            nw,
+            nh,
+            z_old,
+            self._preview_zoom_off_x,
+            self._preview_zoom_off_y,
+        )
+        ox, oy = _preview_anchor_offsets_for_zoom(vx, vy, nw, nh, v, bx, by)
+        self._preview_zoom_off_x = ox
+        self._preview_zoom_off_y = oy
+        self._sl_preview_zoom.blockSignals(True)
+        self._sp_preview_zoom.blockSignals(True)
+        self._sl_preview_zoom.setValue(v)
+        self._sp_preview_zoom.setValue(v)
+        self._sl_preview_zoom.blockSignals(False)
+        self._sp_preview_zoom.blockSignals(False)
+        self._apply_preview_zoom_display()
+
+    def _apply_preview_zoom_display(self) -> None:
+        """ベースプレビューをズームするが、ウィジェットのピクセルサイズは常に nw×nh に固定。"""
+        if self._preview_base_rgb is None:
+            return
+        prev = self._preview_base_rgb
+        nw, nh = prev.size
+        cw, ch = self._preview_meta_cw, self._preview_meta_ch
+        zpct = int(self._sl_preview_zoom.value())
+        disp = _compose_preview_zoom_viewport(
+            prev,
+            nw,
+            nh,
+            zpct,
+            self._preview_zoom_off_x,
+            self._preview_zoom_off_y,
+        )
+        pix = QPixmap.fromImage(_qimage_from_pil(disp))
+        self._lbl_preview.setMinimumSize(0, 0)
+        self._lbl_preview.setFixedSize(nw, nh)
+        self._lbl_preview.setPixmap(pix)
+        self._lbl_preview.set_canvas_preview_scale(cw, ch, nw, nh)
+        if self._preview_meta_oob:
+            self._lbl_warn.setText(
+                "警告: 手動調整の結果、画像がキャンバス外にかかっている可能性があります。入稿前にご確認ください。"
+            )
+            self._lbl_warn.show()
+        else:
+            self._lbl_warn.hide()
+
     def _refresh_preview(self) -> None:
         if not self._template or not self._source_rgba:
             self._lbl_preview.setText("テンプレートと画像を指定してください。")
+            self._lbl_preview.setMinimumSize(400, 400)
+            self._preview_base_rgb = None
+            self._preview_zoom_off_x = None
+            self._preview_zoom_off_y = None
             self._lbl_warn.hide()
             return
         try:
             r = self._resolved()
         except Exception as e:  # noqa: BLE001
             self._lbl_preview.setText(str(e))
+            self._lbl_preview.setMinimumSize(400, 400)
+            self._preview_base_rgb = None
+            self._preview_zoom_off_x = None
+            self._preview_zoom_off_y = None
             return
         cw, ch = r.width, r.height
         scale_pct = float(self._sl_scale.value())
         ox = float(self._sl_ox.value())
         oy = float(self._sl_oy.value())
+        anchor_tl = self._chk_scale_anchor_tl.isChecked()
         max_w, max_h = 720, 720
         ratio = min(max_w / cw, max_h / ch, 1.0) if cw and ch else 1.0
         nw, nh = max(1, int(cw * ratio)), max(1, int(ch * ratio))
+        prev_preview_size = (
+            self._preview_base_rgb.size
+            if self._preview_base_rgb is not None
+            else None
+        )
         try:
             c = compute_contain(cw, ch, self._source_rgba.width, self._source_rgba.height)
-            l, t, rw, rh = apply_manual(c, scale_pct, ox, oy)
+            l, t, rw, rh = apply_manual(
+                c, scale_pct, ox, oy, anchor_top_left=anchor_tl
+            )
             rw_i = max(1, int(round(rw)))
             rh_i = max(1, int(round(rh)))
             oob = is_overflow(
@@ -544,6 +963,7 @@ class MainWindow(QMainWindow):
                 scale_pct,
                 preview_w,
                 preview_h,
+                anchor_tl,
             )
             if (
                 layer_key != self._preview_layer_key
@@ -580,23 +1000,26 @@ class MainWindow(QMainWindow):
                     ov,
                     int(self._sl_tpl_opacity.value()),
                 )
+            self._preview_base_rgb = prev
+            self._preview_meta_cw = cw
+            self._preview_meta_ch = ch
+            self._preview_meta_oob = oob
         except Exception as e:  # noqa: BLE001
+            self._preview_base_rgb = None
+            self._preview_zoom_off_x = None
+            self._preview_zoom_off_y = None
+            self._lbl_preview.setMinimumSize(400, 400)
             self._lbl_preview.setText(f"プレビュー失敗: {e}")
             traceback.print_exc()
             return
-        pix = QPixmap.fromImage(_qimage_from_pil(prev))
-        self._lbl_preview.setFixedSize(nw, nh)
-        self._lbl_preview.setPixmap(pix)
-        self._lbl_preview.set_canvas_preview_scale(cw, ch, nw, nh)
-        if oob:
-            self._lbl_warn.setText(
-                "警告: 手動調整の結果、画像がキャンバス外にかかっている可能性があります。入稿前にご確認ください。"
-            )
-            self._lbl_warn.show()
-        else:
-            self._lbl_warn.hide()
+        if prev_preview_size != (nw, nh):
+            self._preview_zoom_off_x = None
+            self._preview_zoom_off_y = None
+        self._apply_preview_zoom_display()
 
     def _on_export(self) -> None:
+        if self._export_busy:
+            return
         if not self._template or not self._source_rgba:
             QMessageBox.warning(self, "未入力", "テンプレートPSDと入力画像を指定してください。")
             return
@@ -606,28 +1029,97 @@ class MainWindow(QMainWindow):
             return
         try:
             r = self._resolved()
-            layer, li, ti, oob, _ = build_layer_and_overflow(
-                self._source_rgba,
-                r.width,
-                r.height,
-                float(self._sl_scale.value()),
-                float(self._sl_ox.value()),
-                float(self._sl_oy.value()),
-            )
-            write_psd(
-                layer,
-                li,
-                ti,
-                r.width,
-                r.height,
-                self._out_path,
-                r.dpi,
-            )
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "書き出し失敗", str(e))
-            traceback.print_exc()
+            QMessageBox.warning(self, "エラー", str(e))
             return
-        msg = f"保存しました:\n{self._out_path}"
+
+        progress = QProgressDialog(self)
+        progress.setWindowTitle("書き出し")
+        progress.setLabelText("PSD を書き出しています…")
+        progress.setRange(0, 0)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._export_progress = progress
+        progress.show()
+        QApplication.processEvents()
+
+        self._export_busy = True
+        self._btn_export.setEnabled(False)
+        self._export_prev_status = self._status.text()
+        self._status.setText("書き出し中…")
+
+        worker = ExportWorker(
+            self._source_rgba,
+            r,
+            float(self._sl_scale.value()),
+            float(self._sl_ox.value()),
+            float(self._sl_oy.value()),
+            self._chk_scale_anchor_tl.isChecked(),
+            self._out_path,
+        )
+        thread = QThread(self)
+        self._export_thread = thread
+        self._export_worker = worker
+        worker.moveToThread(thread)
+        worker.finished.connect(self._on_worker_export_finished)
+        thread.finished.connect(self._on_export_thread_finished)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        invoked = QMetaObject.invokeMethod(
+            worker,
+            "run",
+            Qt.ConnectionType.QueuedConnection,
+        )
+        if not invoked:
+            self._on_worker_export_finished(
+                ("err", RuntimeError("書き出しスレッドの開始に失敗しました。"))
+            )
+
+    def _on_worker_export_finished(self, payload: object) -> None:
+        """worker.finished を1スロットで処理し、payload 設定後に必ず thread.quit（順序競合を防ぐ）。"""
+        self._export_payload = payload
+        t = self._export_thread
+        if t is not None:
+            t.quit()
+
+    def _on_export_thread_finished(self) -> None:
+        self._export_thread = None
+        self._export_worker = None
+        self._export_busy = False
+        self._btn_export.setEnabled(True)
+        if self._export_progress is not None:
+            self._export_progress.close()
+            self._export_progress = None
+
+        payload = self._export_payload
+        self._export_payload = None
+
+        if (
+            payload is None
+            or not isinstance(payload, tuple)
+            or len(payload) < 2
+            or payload[0] not in ("ok", "err")
+        ):
+            self._status.setText(self._export_prev_status)
+            return
+
+        kind = payload[0]
+        if kind == "err":
+            err = payload[1]
+            self._status.setText(self._export_prev_status)
+            QMessageBox.critical(self, "書き出し失敗", str(err))
+            if isinstance(err, BaseException):
+                traceback.print_exception(type(err), err, err.__traceback__)
+            return
+
+        if len(payload) < 3:
+            self._status.setText(self._export_prev_status)
+            return
+        _, out_path, oob = payload
+        self._status.setText("保存しました。")
+        msg = f"保存しました:\n{out_path}"
         if oob:
             msg += "\n\n（上記のとおり、キャンバス外にはみ出しの恐れがあります）"
         QMessageBox.information(self, "完了", msg)

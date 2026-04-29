@@ -33,19 +33,28 @@ def apply_manual(
     manual_scale_pct: float,
     off_x: float,
     off_y: float,
+    *,
+    anchor_top_left: bool = False,
 ) -> tuple[float, float, float, float]:
     """
     手動拡大率 (%)・オフセットを適用した最終的な枠
-    (left, top, width, height)。画像の中心基準で拡大する。
+    (left, top, width, height)。
+
+    anchor_top_left が False のときは contain 後の矩形の中心をキープして拡大（既定）。
+    True のときは contain 後の矩形の左上を固定して右下方向にのみ伸縮する。
     """
     m = manual_scale_pct / 100.0
     if m <= 0:
         raise ValueError("拡大率は正である必要があります。")
     rw, rh = c.resized_w * m, c.resized_h * m
-    left = c.left + (c.resized_w - rw) / 2.0
-    top = c.top + (c.resized_h - rh) / 2.0
-    left += off_x
-    top += off_y
+    if anchor_top_left:
+        left = c.left + off_x
+        top = c.top + off_y
+    else:
+        left = c.left + (c.resized_w - rw) / 2.0
+        top = c.top + (c.resized_h - rh) / 2.0
+        left += off_x
+        top += off_y
     return left, top, rw, rh
 
 
