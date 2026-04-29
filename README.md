@@ -9,7 +9,7 @@
 
 ## セットアップ
 
-**cmd / PowerShell** では:
+### コマンドプロンプト（cmd.exe）
 
 ```bat
 cd PSD-Tool
@@ -18,7 +18,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**Git Bash** で `source .venv/Scripts/activate` したあと `sed: command not found` が出る場合、PATH に Git の `usr\bin`（`sed` がある）が通っていないことがあります。`(.venv)` が付いていれば仮想環境は有効なので、無視してよいことも多いです。回避策は **PowerShell / cmd** で有効化する、または有効化せず次のように `python` のフルパスを使うことです:
+### PowerShell
+
+```powershell
+cd PSD-Tool
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### Git Bash
+
+`source .venv/Scripts/activate` のあと `sed: command not found` が出る場合、PATH に Git の `usr\bin`（`sed` がある）が通っていないことがあります。`(.venv)` が付いていれば仮想環境は有効なので、無視してよいことも多いです。回避策は **cmd / PowerShell** で有効化するか、次のように **activate なし**で実行します:
 
 ```bash
 .venv/Scripts/pip install -r requirements.txt

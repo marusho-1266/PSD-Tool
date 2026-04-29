@@ -13,7 +13,7 @@ try:
 except ImportError:
     _BILINEAR = Image.BILINEAR  # type: ignore[attr-defined]
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -371,8 +371,6 @@ class MainWindow(QMainWindow):
         ratio = min(max_w / cw, max_h / ch, 1.0) if cw and ch else 1.0
         nw, nh = max(1, int(cw * ratio)), max(1, int(ch * ratio))
         small = prev.resize((nw, nh), _BILINEAR)
-        from PySide6.QtGui import QPixmap
-
         pix = QPixmap.fromImage(_qimage_from_pil(small))
         self._lbl_preview.setFixedSize(nw, nh)
         self._lbl_preview.setPixmap(pix)

@@ -67,13 +67,12 @@ def is_overflow(
     visible_bbox: tuple[int, int, int, int] | None,
 ) -> bool:
     """
-    幾何は画像全体の枠。全面透過などで visible_bbox が None の場合は
-    仕様 §10.2 に従いはみ出し警告対象外。
+    配置矩形とキャンバスの幾何で判定する。
+
+    アルファの可視外接矩形が取れない（全面透過等）場合は §10.2
+    に従い はみ出し警告の対象外とするため、無条件で False。
     """
     if visible_bbox is None:
-        wpx = int(round(w))
-        hpx = int(round(h))
-        if wpx <= 0 or hpx <= 0:
-            return False
+        return False
     l, t, r, b = left, top, left + w, top + h
     return l < 0 or t < 0 or r > canvas_w or b > canvas_h
