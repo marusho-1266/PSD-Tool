@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image
+
 from psd_tools import PSDImage
 from psd_tools.constants import Resource
 
@@ -37,6 +39,20 @@ def read_template_psd(path: str | Path) -> TemplateInfo:
     except Exception:
         dpi = None
     return TemplateInfo(width=w, height=h, dpi=dpi, path=str(path))
+
+
+def composite_template_overlay_rgb(path: str | Path) -> Image.Image:
+    """
+    テンプレート PSD を可視レイヤで平坦化した RGB 画像。
+    プレビューで塗り足し線・トンボ等と入力画像を重ねる用。書き出し PSD には含めない。
+    """
+    psd = PSDImage.open(str(path))
+    img = psd.composite()
+    if img.mode == "CMYK":
+        img = img.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
 
 
 def resolution_info_from_dpi(dpi: float):

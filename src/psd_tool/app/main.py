@@ -10,8 +10,10 @@ try:
     from PIL import ImageResampling
 
     _BILINEAR = ImageResampling.BILINEAR
+    _LANCZOS = ImageResampling.LANCZOS
 except ImportError:
     _BILINEAR = Image.BILINEAR  # type: ignore[attr-defined]
+    _LANCZOS = Image.LANCZOS  # type: ignore[attr-defined]
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
@@ -33,10 +35,15 @@ from PySide6.QtWidgets import (
 )
 
 from psd_tool import __version__
-from psd_tool.core.export import build_layer_and_overflow, composite_preview_rgb, write_psd
+from psd_tool.core.export import (
+    blend_template_guides_over_rgb,
+    build_layer_and_overflow,
+    composite_preview_rgb,
+    write_psd,
+)
 from psd_tool.core.images import heif_available, open_image_pil
 from psd_tool.core.resolve import resolve_dimensions, ResolvedOutput
-from psd_tool.core.template import read_template_psd, TemplateInfo
+from psd_tool.core.template import composite_template_overlay_rgb, read_template_psd, TemplateInfo
 
 
 def _qimage_from_pil(im: Image.Image):
@@ -55,6 +62,7 @@ class MainWindow(QMainWindow):
         self._image_path: str | None = None
         self._out_path: str | None = None
         self._template: TemplateInfo | None = None
+        self._template_overlay_rgb: Image.Image | None = None
         self._source_rgba: Image.Image | None = None
         self._io_warn: str | None = None
 
@@ -142,7 +150,19 @@ class MainWindow(QMainWindow):
         # プレビュー
         right = QWidget()
         rl = QVBoxLayout(right)
-        rl.addWidget(QLabel("プレビュー (白背景 / contain)"))
+        rl.addWidget(QLabel("プレビュー"))
+        self._chk_tpl_overlay = QCheckBox(
+            "テンプレート（点線・トンボ等）を重ねて表示（位置合わせ用）"
+        )
+        self._chk_tpl_overlay.setChecked(True)
+        self._chk_tpl_overlay.setToolTip(
+            "印刷所向けテンプレートを平坦化したものを前面に重ねます。"
+            "書き出し PSD にはテンプレートは含まれません。"
+        )
+        self._chk_tpl_overlay.toggled.connect(self._refresh_preview)
+        rl.addWidget(self._chk_tpl_overlay)
+        self._sl_tpl_opacity = self._slider_row("ガイドの強さ (%)", 10, 100, 90, rl)
+        self._sl_tpl_opacity.valueChanged.connect(self._refresh_preview)
         self._lbl_preview = QLabel("テンプレートと画像を指定してください。")
         self._lbl_preview.setAlignment(Qt.AlignCenter)
         self._lbl_preview.setMinimumSize(400, 400)
@@ -253,11 +273,25 @@ class MainWindow(QMainWindow):
             return
         self._template_path = path
         self._template = t
+        self._template_overlay_rgb = None
+        try:
+            self._template_overlay_rgb = composite_template_overlay_rgb(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "プレビュー",
+                "テンプレートのガイド画像を作成できませんでした。"
+                "プレビューは入力画像のみになります。\n\n"
+                f"{e}",
+            )
         self._ed_template.setText(path)
         self._sp_w.setValue(t.width)
         self._sp_h.setValue(t.height)
         d = int(round(t.dpi)) if t.dpi and t.dpi > 0 else 300
         self._sp_dpi.setValue(d)
+        has_ov = self._template_overlay_rgb is not None
+        self._chk_tpl_overlay.setEnabled(has_ov)
+        self._sl_tpl_opacity.setEnabled(has_ov)
         self._update_template_labels()
         self._on_contain()
         self._status.setText(
@@ -362,6 +396,18 @@ class MainWindow(QMainWindow):
                 float(self._sl_oy.value()),
             )
             prev = composite_preview_rgb(layer, li, ti, cw, ch)
+            if (
+                self._chk_tpl_overlay.isChecked()
+                and self._template_overlay_rgb is not None
+            ):
+                ov = self._template_overlay_rgb
+                if ov.size != (cw, ch):
+                    ov = ov.resize((cw, ch), _LANCZOS)
+                prev = blend_template_guides_over_rgb(
+                    prev,
+                    ov,
+                    int(self._sl_tpl_opacity.value()),
+                )
         except Exception as e:  # noqa: BLE001
             self._lbl_preview.setText(f"プレビュー失敗: {e}")
             traceback.print_exc()

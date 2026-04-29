@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 try:
     from PIL import ImageResampling  # Pillow >= 9.1
@@ -63,6 +63,26 @@ def composite_preview_rgb(
     canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
     canvas.paste(layer_rgba, (left, top), layer_rgba)
     return canvas
+
+
+def blend_template_guides_over_rgb(
+    base_rgb: Image.Image,
+    template_rgb: Image.Image,
+    opacity_pct: int,
+) -> Image.Image:
+    """
+    テンプレート平坦画像を前面に重ねる。白に近い画素はベースをそのまま見せ、線や文字のみ目立たせる。
+    opacity_pct はガイドの最大不透過（1〜100）。
+    """
+    base_rgb = base_rgb.convert("RGB")
+    template_rgb = template_rgb.convert("RGB")
+    if base_rgb.size != template_rgb.size:
+        template_rgb = template_rgb.resize(base_rgb.size, _LANCZOS)
+    op = max(1, min(100, opacity_pct))
+    gray = ImageOps.grayscale(template_rgb)
+    # テンプレが白い領域はマスク 0（ベース）、線や赤トンボ等はマスク大
+    mask = gray.point(lambda x: (255 - x) * op // 100)
+    return Image.composite(template_rgb, base_rgb, mask)
 
 
 def write_psd(
