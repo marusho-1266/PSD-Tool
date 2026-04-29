@@ -38,10 +38,10 @@ from psd_tool import __version__
 from psd_tool.core.export import (
     blend_template_guides_over_rgb,
     build_layer_and_overflow,
-    composite_preview_rgb,
     write_psd,
 )
 from psd_tool.core.images import heif_available, open_image_pil
+from psd_tool.core.layout import apply_manual, compute_contain, is_overflow, visible_alpha_bbox_rgba
 from psd_tool.core.resolve import resolve_dimensions, ResolvedOutput
 from psd_tool.core.template import composite_template_overlay_rgb, read_template_psd, TemplateInfo
 
@@ -50,6 +50,88 @@ def _qimage_from_pil(im: Image.Image):
     if im.mode != "RGB":
         im = im.convert("RGB")
     return ImageQt.ImageQt(im)
+
+
+class PreviewLabel(QLabel):
+    """プレビュー画像を左ドラッグで平行移動し、位置 X/Y スライダーと同期する。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._scale_x = 1.0
+        self._scale_y = 1.0
+        self._drag_active = False
+        self._last_mouse = None
+        self._delta_cb = None
+        self._begin_cb = None
+        self.setMouseTracking(False)
+
+    def set_drag_callbacks(self, begin_cb, delta_cb) -> None:
+        self._begin_cb = begin_cb
+        self._delta_cb = delta_cb
+
+    def set_canvas_preview_scale(self, cw: int, ch: int, nw: int, nh: int) -> None:
+        self._scale_x = cw / nw if nw > 0 else 1.0
+        self._scale_y = ch / nh if nh > 0 else 1.0
+
+    def mousePressEvent(self, event) -> None:
+        from PySide6.QtGui import QMouseEvent
+
+        if (
+            isinstance(event, QMouseEvent)
+            and event.button() == Qt.LeftButton
+            and self._delta_cb is not None
+            and self.pixmap() is not None
+            and not self.pixmap().isNull()
+        ):
+            self._drag_active = True
+            self._last_mouse = event.position()
+            if self._begin_cb:
+                self._begin_cb()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.grabMouse()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        from PySide6.QtGui import QMouseEvent
+
+        if isinstance(event, QMouseEvent) and event.button() == Qt.LeftButton:
+            if self._drag_active:
+                self.releaseMouse()
+                self._drag_active = False
+                self._last_mouse = None
+                self.setCursor(
+                    Qt.CursorShape.OpenHandCursor
+                    if self.pixmap() is not None and not self.pixmap().isNull()
+                    else Qt.CursorShape.ArrowCursor
+                )
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            self._drag_active
+            and self._last_mouse is not None
+            and self._delta_cb is not None
+        ):
+            pos = event.position()
+            dx = pos.x() - self._last_mouse.x()
+            dy = pos.y() - self._last_mouse.y()
+            self._last_mouse = pos
+            self._delta_cb(dx * self._scale_x, dy * self._scale_y)
+        super().mouseMoveEvent(event)
+
+    def enterEvent(self, event) -> None:
+        if self.pixmap() is not None and not self.pixmap().isNull():
+            self.setCursor(
+                Qt.CursorShape.ClosedHandCursor
+                if self._drag_active
+                else Qt.CursorShape.OpenHandCursor
+            )
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self._drag_active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().leaveEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +147,12 @@ class MainWindow(QMainWindow):
         self._template_overlay_rgb: Image.Image | None = None
         self._source_rgba: Image.Image | None = None
         self._io_warn: str | None = None
+        self._preview_pan_rx = 0.0
+        self._preview_pan_ry = 0.0
+        self._preview_layer_key: tuple | None = None
+        self._preview_layer_rgba: Image.Image | None = None
+        self._overlay_at_preview_key: tuple[int, int, int] | None = None
+        self._overlay_at_preview_rgb: Image.Image | None = None
 
         w = self._build_ui()
         self.setCentralWidget(w)
@@ -163,11 +251,19 @@ class MainWindow(QMainWindow):
         rl.addWidget(self._chk_tpl_overlay)
         self._sl_tpl_opacity = self._slider_row("ガイドの強さ (%)", 10, 100, 90, rl)
         self._sl_tpl_opacity.valueChanged.connect(self._refresh_preview)
-        self._lbl_preview = QLabel("テンプレートと画像を指定してください。")
+        self._lbl_preview = PreviewLabel()
+        self._lbl_preview.setText("テンプレートと画像を指定してください。")
         self._lbl_preview.setAlignment(Qt.AlignCenter)
         self._lbl_preview.setMinimumSize(400, 400)
         self._lbl_preview.setStyleSheet("background: #e8e8e8;")
         self._lbl_preview.setScaledContents(False)
+        self._lbl_preview.setToolTip(
+            "左ボタンドラッグで入力画像を移動します（位置 X / Y と連動）。"
+        )
+        self._lbl_preview.set_drag_callbacks(
+            self._preview_drag_begin,
+            self._on_preview_drag_delta,
+        )
         rl.addWidget(self._lbl_preview, 1)
         self._status = QLabel("準備中")
         self._status.setStyleSheet("color: #555;")
@@ -184,6 +280,33 @@ class MainWindow(QMainWindow):
         self._sp_h.valueChanged.connect(self._on_dim_changed)
         self._sp_dpi.valueChanged.connect(self._on_dim_changed)
         return root
+
+    def _preview_drag_begin(self) -> None:
+        self._preview_pan_rx = 0.0
+        self._preview_pan_ry = 0.0
+
+    def _on_preview_drag_delta(self, dx_canvas: float, dy_canvas: float) -> None:
+        if not self._template or not self._source_rgba:
+            return
+        self._preview_pan_rx += dx_canvas
+        self._preview_pan_ry += dy_canvas
+        ix = int(self._preview_pan_rx)
+        iy = int(self._preview_pan_ry)
+        self._preview_pan_rx -= ix
+        self._preview_pan_ry -= iy
+        if ix == 0 and iy == 0:
+            return
+        ox_lo, ox_hi = self._sl_ox.minimum(), self._sl_ox.maximum()
+        oy_lo, oy_hi = self._sl_oy.minimum(), self._sl_oy.maximum()
+        ox = max(ox_lo, min(ox_hi, self._sl_ox.value() + ix))
+        oy = max(oy_lo, min(oy_hi, self._sl_oy.value() + iy))
+        self._sl_ox.blockSignals(True)
+        self._sl_oy.blockSignals(True)
+        self._sl_ox.setValue(ox)
+        self._sl_oy.setValue(oy)
+        self._sl_ox.blockSignals(False)
+        self._sl_oy.blockSignals(False)
+        self._refresh_preview()
 
     def _row_file(
         self, label: str, slot, parent_l: QVBoxLayout
@@ -274,6 +397,8 @@ class MainWindow(QMainWindow):
         self._template_path = path
         self._template = t
         self._template_overlay_rgb = None
+        self._overlay_at_preview_key = None
+        self._overlay_at_preview_rgb = None
         try:
             self._template_overlay_rgb = composite_template_overlay_rgb(path)
         except Exception as e:  # noqa: BLE001
@@ -315,6 +440,8 @@ class MainWindow(QMainWindow):
             return
         self._image_path = path
         self._source_rgba = im
+        self._preview_layer_key = None
+        self._preview_layer_rgba = None
         self._io_warn = warn
         self._ed_image.setText(path)
         wmsg = f"\n{warn}" if warn else ""
@@ -386,23 +513,68 @@ class MainWindow(QMainWindow):
             self._lbl_preview.setText(str(e))
             return
         cw, ch = r.width, r.height
+        scale_pct = float(self._sl_scale.value())
+        ox = float(self._sl_ox.value())
+        oy = float(self._sl_oy.value())
+        max_w, max_h = 720, 720
+        ratio = min(max_w / cw, max_h / ch, 1.0) if cw and ch else 1.0
+        nw, nh = max(1, int(cw * ratio)), max(1, int(ch * ratio))
         try:
-            layer, li, ti, oob, _ = build_layer_and_overflow(
-                self._source_rgba,
+            c = compute_contain(cw, ch, self._source_rgba.width, self._source_rgba.height)
+            l, t, rw, rh = apply_manual(c, scale_pct, ox, oy)
+            rw_i = max(1, int(round(rw)))
+            rh_i = max(1, int(round(rh)))
+            oob = is_overflow(
+                l,
+                t,
+                float(rw_i),
+                float(rh_i),
                 cw,
                 ch,
-                float(self._sl_scale.value()),
-                float(self._sl_ox.value()),
-                float(self._sl_oy.value()),
+                visible_alpha_bbox_rgba(self._source_rgba),
             )
-            prev = composite_preview_rgb(layer, li, ti, cw, ch)
+
+            preview_w = max(1, int(round(rw * ratio)))
+            preview_h = max(1, int(round(rh * ratio)))
+            layer_key = (
+                id(self._source_rgba),
+                self._source_rgba.size,
+                cw,
+                ch,
+                scale_pct,
+                preview_w,
+                preview_h,
+            )
+            if (
+                layer_key != self._preview_layer_key
+                or self._preview_layer_rgba is None
+            ):
+                layer = self._source_rgba.resize((preview_w, preview_h), _BILINEAR)
+                if layer.mode != "RGBA":
+                    layer = layer.convert("RGBA")
+                self._preview_layer_rgba = layer
+                self._preview_layer_key = layer_key
+
+            prev = Image.new("RGB", (nw, nh), (255, 255, 255))
+            prev.paste(
+                self._preview_layer_rgba,
+                (int(round(l * ratio)), int(round(t * ratio))),
+                self._preview_layer_rgba,
+            )
             if (
                 self._chk_tpl_overlay.isChecked()
                 and self._template_overlay_rgb is not None
             ):
-                ov = self._template_overlay_rgb
-                if ov.size != (cw, ch):
-                    ov = ov.resize((cw, ch), _LANCZOS)
+                ov_key = (nw, nh, id(self._template_overlay_rgb))
+                if (
+                    self._overlay_at_preview_key != ov_key
+                    or self._overlay_at_preview_rgb is None
+                ):
+                    self._overlay_at_preview_rgb = self._template_overlay_rgb.resize(
+                        (nw, nh), _LANCZOS
+                    )
+                    self._overlay_at_preview_key = ov_key
+                ov = self._overlay_at_preview_rgb
                 prev = blend_template_guides_over_rgb(
                     prev,
                     ov,
@@ -412,14 +584,10 @@ class MainWindow(QMainWindow):
             self._lbl_preview.setText(f"プレビュー失敗: {e}")
             traceback.print_exc()
             return
-        # 枠内に縮小表示
-        max_w, max_h = 720, 720
-        ratio = min(max_w / cw, max_h / ch, 1.0) if cw and ch else 1.0
-        nw, nh = max(1, int(cw * ratio)), max(1, int(ch * ratio))
-        small = prev.resize((nw, nh), _BILINEAR)
-        pix = QPixmap.fromImage(_qimage_from_pil(small))
+        pix = QPixmap.fromImage(_qimage_from_pil(prev))
         self._lbl_preview.setFixedSize(nw, nh)
         self._lbl_preview.setPixmap(pix)
+        self._lbl_preview.set_canvas_preview_scale(cw, ch, nw, nh)
         if oob:
             self._lbl_warn.setText(
                 "警告: 手動調整の結果、画像がキャンバス外にかかっている可能性があります。入稿前にご確認ください。"

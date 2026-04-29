@@ -14,9 +14,66 @@ from psd_tools import PSDImage
 from psd_tools.constants import Resource
 from psd_tools.psd.image_resources import ImageResource
 
-from psd_tool.core.layout import ContainResult, apply_manual, compute_contain, visible_alpha_bbox_rgba
+from psd_tool.core.layout import (
+    ContainResult,
+    apply_manual,
+    compute_contain,
+    is_overflow,
+    visible_alpha_bbox_rgba,
+)
 from psd_tool.core.resolve import ResolvedOutput
 from psd_tool.core.template import resolution_info_from_dpi
+
+
+def compute_scaled_layer_for_canvas(
+    source_rgba: Image.Image,
+    canvas_w: int,
+    canvas_h: int,
+    manual_scale_pct: float,
+) -> tuple[Image.Image, int, int, ContainResult]:
+    """
+    contain と手動拡大率まで適用したリサイズ済みレイヤー。
+    オフセット (off_x, off_y) はサイズに影響しないため、位置だけ変える場合はこれを再利用する。
+    """
+    iw, ih = source_rgba.size
+    c = compute_contain(canvas_w, canvas_h, iw, ih)
+    _, _, rw, rh = apply_manual(c, manual_scale_pct, 0.0, 0.0)
+    rw_i = max(1, int(round(rw)))
+    rh_i = max(1, int(round(rh)))
+    scaled = source_rgba.resize((rw_i, rh_i), _LANCZOS)
+    if scaled.mode != "RGBA":
+        scaled = scaled.convert("RGBA")
+    return scaled, rw_i, rh_i, c
+
+
+def layer_paste_rect_and_overflow(
+    source_rgba: Image.Image,
+    canvas_w: int,
+    canvas_h: int,
+    manual_scale_pct: float,
+    off_x: float,
+    off_y: float,
+    scaled_rgba: Image.Image,
+    rw_i: int,
+    rh_i: int,
+    c: ContainResult,
+) -> tuple[int, int, bool]:
+    """キャッシュした scaled_rgba に対しオフセットのみ適用し貼り付け座標とはみ出しを返す。"""
+    l, t, rw, rh = apply_manual(c, manual_scale_pct, off_x, off_y)
+    ri_w = max(1, int(round(rw)))
+    ri_h = max(1, int(round(rh)))
+    if ri_w != rw_i or ri_h != rh_i:
+        raise RuntimeError(
+            "スケール済みレイヤとオフセット適用後の寸法が一致しません。"
+            f" expected ({rw_i}x{rh_i}), got ({ri_w}x{ri_h})."
+        )
+    li = int(round(l))
+    ti = int(round(t))
+    vis = visible_alpha_bbox_rgba(source_rgba)
+    oob = is_overflow(
+        l, t, float(rw_i), float(rh_i), canvas_w, canvas_h, vis
+    )
+    return li, ti, oob
 
 
 def build_layer_and_overflow(
@@ -30,24 +87,20 @@ def build_layer_and_overflow(
     """
     リサイズ後の RGBA レイヤ画像と整数座標、はみ出し、contain 情報。
     """
-    iw, ih = source_rgba.size
-    c = compute_contain(canvas_w, canvas_h, iw, ih)
-    l, t, rw, rh = apply_manual(c, manual_scale_pct, off_x, off_y)
-    vis = visible_alpha_bbox_rgba(source_rgba)
-
-    rw_i = max(1, int(round(rw)))
-    rh_i = max(1, int(round(rh)))
-    scaled = source_rgba.resize((rw_i, rh_i), _LANCZOS)
-    if scaled.mode != "RGBA":
-        scaled = scaled.convert("RGBA")
-
-    li = int(round(l))
-    ti = int(round(t))
-
-    from psd_tool.core.layout import is_overflow  # 循環避け
-
-    oob = is_overflow(
-        l, t, float(rw_i), float(rh_i), canvas_w, canvas_h, vis
+    scaled, rw_i, rh_i, c = compute_scaled_layer_for_canvas(
+        source_rgba, canvas_w, canvas_h, manual_scale_pct
+    )
+    li, ti, oob = layer_paste_rect_and_overflow(
+        source_rgba,
+        canvas_w,
+        canvas_h,
+        manual_scale_pct,
+        off_x,
+        off_y,
+        scaled,
+        rw_i,
+        rh_i,
+        c,
     )
     return scaled, li, ti, oob, c
 
