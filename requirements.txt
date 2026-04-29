@@ -1,0 +1,5 @@
+# PSD resize tool - see README for optional HEIC (pillow-heif)
+psd-tools>=1.10.0
+Pillow>=10.1.1
+PySide6>=6.6.0
+# optional: pillow-heif>=0.16.0
