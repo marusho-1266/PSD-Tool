@@ -46,8 +46,13 @@ def composite_template_overlay_rgb(path: str | Path) -> Image.Image:
     テンプレート PSD を可視レイヤで平坦化した RGB 画像。
     プレビューで塗り足し線・トンボ等と入力画像を重ねる用。書き出し PSD には含めない。
     """
-    psd = PSDImage.open(str(path))
+    resolved = Path(path).resolve()
+    psd = PSDImage.open(str(resolved))
     img = psd.composite()
+    if img is None:
+        raise RuntimeError(
+            f"テンプレート PSD の合成に失敗しました（composite が None）。ファイル: {resolved}"
+        )
     if img.mode == "CMYK":
         img = img.convert("RGB")
     elif img.mode != "RGB":
