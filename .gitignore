@@ -6,3 +6,5 @@ venv/
 template/
 build/
 dist/
+output/
+data/

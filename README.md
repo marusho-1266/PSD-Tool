@@ -57,6 +57,35 @@ python -m psd_tool
 pip install pillow-heif
 ```
 
+## 配布用 exe のビルド（Windows）
+
+[PyInstaller](https://pyinstaller.org/) で単一の `dist\PSDResizeTool.exe` を作成します（GUI・コンソールなし）。
+
+1. 上記と同様に仮想環境を作り、`requirements.txt` をインストール済みであること。
+2. ビルド用依存を追加: `pip install -r requirements-build.txt`
+3. リポジトリルートで spec を実行:
+
+```bat
+pyinstaller --clean --noconfirm PSDTool.spec
+```
+
+またはスクリプトから一括（`.venv` が既にある前提）:
+
+- **cmd**: `scripts\build_exe.bat`
+- **PowerShell**: `.\scripts\build_exe.ps1`
+
+成果物は `dist\PSDResizeTool.exe` です。初回起動時はウイルス対策ソフトのスキャンで数十秒かかることがあります。
+
+### メモ
+
+- エントリはルートの `run_exe_entry.py`（凍結時も `src` 配下の `psd_tool` をパスに含めて解析しています）。
+- PySide6 は `PSDTool.spec` 内で `collect_all` によりバンドルしています。
+- HEIC 対応を exe に含める場合は、ビルド環境に `pillow-heif` を入れたうえで再度ビルドしてください（オプション）。
+
 ## 仕様
 
 `docs/requirements-spec.md` を参照してください。
+
+## 個人開発ロードマップ
+
+販売・拡張方針・連載計画・判断基準は `docs/個人開発ロードマップ.md` を参照してください。

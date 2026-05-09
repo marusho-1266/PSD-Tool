@@ -1,0 +1,2 @@
+# PyInstaller (frozen exe); install with: pip install -r requirements-build.txt
+pyinstaller>=6.3,<8

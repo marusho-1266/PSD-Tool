@@ -58,6 +58,19 @@ def _qimage_from_pil(im: Image.Image):
 _PREVIEW_BG_GREY = (232, 232, 232)
 
 
+def _app_sidecar_dir() -> Path:
+    """参照ダイアログの基準ディレクトリ。配布 exe では exe と同階層、開発時はカレントディレクトリ。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path.cwd().resolve()
+
+
+def _ensure_subdir(sub: str) -> Path:
+    p = _app_sidecar_dir() / sub
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _compose_preview_zoom_viewport(
     base_rgb: Image.Image,
     nw: int,
@@ -712,7 +725,10 @@ class MainWindow(QMainWindow):
 
     def _pick_template(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "テンプレート PSD", str(Path.home()), "PSD (*.psd);;全て (*.*)"
+            self,
+            "テンプレート PSD",
+            str(_ensure_subdir("template")),
+            "PSD (*.psd);;全て (*.*)",
         )
         if not path:
             return
@@ -755,7 +771,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "入力画像",
-            str(Path.home()),
+            str(_ensure_subdir("data")),
             "Images (*.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff *.bmp"
             " *.heic *.heif);;全て (*.*)",
         )
@@ -779,8 +795,9 @@ class MainWindow(QMainWindow):
         self._status.setText("画像を読み込みました" + wmsg)
 
     def _pick_out(self) -> None:
+        default_psd = _ensure_subdir("output") / "out.psd"
         path, _ = QFileDialog.getSaveFileName(
-            self, "PSD として保存", str(Path.home() / "out.psd"), "PSD (*.psd)"
+            self, "PSD として保存", str(default_psd.resolve()), "PSD (*.psd)"
         )
         if not path:
             return
